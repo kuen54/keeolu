@@ -208,9 +208,9 @@
     // killer. Play only the most-visible few (>=35% in view, capped) and pause the
     // rest — clips scrolling past (or barely peeking in) don't decode. Each shows its
     // poster while paused, so a paused-but-visible tile still looks intentional.
-    var bg = [], CAP = 6;
+    var bg = [], CAP = 4;
     function reconcile() {
-      var vis = bg.filter(function (v) { return v.__ratio >= 0.35; })
+      var vis = bg.filter(function (v) { return v.__ratio >= 0.4; })
                   .sort(function (a, b) { return b.__ratio - a.__ratio; });
       bg.forEach(function (v) {
         var i = vis.indexOf(v);
@@ -220,17 +220,7 @@
     var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es) {
       es.forEach(function (e) { e.target.__ratio = e.isIntersecting ? e.intersectionRatio : 0; });
       reconcile();
-    }, { threshold: [0, 0.35, 0.6, 1] }) : null;
-    // warm interactive clips (click-players) BEFORE the user acts, once they're near
-    // the viewport — so a click plays instantly instead of buffering 3-4MB from cold.
-    // A first-frame poster is already shown, so this only affects click latency.
-    var warm = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es, obs) {
-      es.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        obs.unobserve(e.target);
-        try { e.target.preload = 'auto'; e.target.load(); } catch (x) {}
-      });
-    }, { rootMargin: '400px' }) : null;
+    }, { threshold: [0, 0.4, 0.7, 1] }) : null;
 
     each(document.querySelectorAll('video'), function (v) {
       v.setAttribute('playsinline', ''); v.playsInline = true;
@@ -241,7 +231,12 @@
         v.__hoverPlay = true; setupThumb(card, v);
       } else if (player) {
         setupClickPlayer(player, v);
-        if (warm) warm.observe(v);                         // buffer ahead -> instant click
+        // buffer only when the pointer actually enters the player (clear intent to
+        // click) — NOT while scrolling past, which was pulling ~30MB of showcase video
+        // and starving the visible content.
+        player.addEventListener('pointerenter', function () {
+          try { v.preload = 'auto'; v.load(); } catch (x) {}
+        }, { once: true });
       } else {
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
         bg.push(v);
