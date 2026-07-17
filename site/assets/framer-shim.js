@@ -254,6 +254,17 @@
         if (io) io.observe(v); else safePlay(v);
       }
     });
+
+    // Pause ALL background clips while the user is actively scrolling — decoding a
+    // wall of videos mid-scroll is the heaviest per-frame cost on a Retina display.
+    // They resume (most-visible first) a moment after scrolling settles; each shows
+    // its poster meanwhile, so nothing looks broken.
+    var scrolling = false, scrollTO;
+    window.addEventListener('scroll', function () {
+      if (!scrolling) { scrolling = true; for (var i = 0; i < bg.length; i++) if (!bg[i].paused) bg[i].pause(); }
+      clearTimeout(scrollTO);
+      scrollTO = setTimeout(function () { scrolling = false; reconcile(); }, 130);
+    }, { passive: true });
   }
   function safePlay(v) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
 
