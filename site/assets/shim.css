@@ -1,0 +1,9 @@
+/* Minimal support styles for framer-shim.js. Framer's own inline CSS drives all
+   layout; this only smooths a couple of shim-driven interactions. */
+html { scroll-behavior: smooth; }
+
+/* caption overlay fade on thumbnail hover (opacity is toggled by the shim) */
+[data-shim-caption] { transition: opacity 0.25s ease; }
+
+/* marquee tracks never wrap while the shim clones/animates them */
+ul[style*="translateX"] { flex-wrap: nowrap !important; }

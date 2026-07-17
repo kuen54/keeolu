@@ -1,0 +1,7 @@
+# verification / build artifacts (not part of the deliverable)
+shots/
+verify_out.json
+verify_err.log
+node_modules/
+.DS_Store
+*.log
