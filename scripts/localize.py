@@ -74,6 +74,19 @@ def rewrite_gifs(html):
                 % (base, base, wh, style))
     return re.sub(r'<img\b[^>]*?>', repl, html)
 
+def rewrite_gif_posters(html):
+    """Framer uses an animated GIF as the poster of some <video>s. Those GIFs are
+    transcoded and pruned like any other, so repoint the poster at the generated
+    first-frame jpg — a static poster is fine (it only shows for the instant before
+    in-view autoplay / a click starts the mp4), and it drops a multi-MB animated GIF
+    that was loading just to be a placeholder."""
+    def repl(m):
+        base = m.group(1)
+        if base in _CONVERTED_GIFS:
+            return 'poster="assets/images/%s.poster.jpg"' % base
+        return m.group(0)
+    return re.sub(r'poster="assets/images/([A-Za-z0-9]+)(?:\.scale-down-to-\d+)?\.gif"', repl, html)
+
 def lazyload_images(html):
     # defer every remaining <img> until it nears the viewport (all have explicit
     # width/height, so no layout shift). Inactive-breakpoint copies live under
@@ -159,6 +172,7 @@ for src, dst in PAGES.items():
     html = open(src, encoding='utf-8').read()
     html = rewrite_assets(html)
     html = rewrite_gifs(html)      # standalone <img *.gif> -> muted autoplay <video>
+    html = rewrite_gif_posters(html)  # <video poster="*.gif"> -> transcoded first-frame jpg
     html = lazyload_images(html)   # remaining <img> -> loading="lazy"
     html = defer_videos(html)      # Framer <video preload="auto"> -> "none"
     html = rewrite_head_urls(html)
@@ -179,15 +193,30 @@ for dst,(n,remain) in report.items():
         for r in remain[:30]:
             print('   ', r)
 
-# Prune the now-unreferenced source GIFs (converted to MP4 above) from the deploy —
-# no page loads them any more, they'd just be ~110MB of dead weight. Idempotent:
-# a rerun finds nothing left to remove. Originals remain recoverable via git history
-# / download.py if a re-encode is ever needed.
+# Prune GIF-related files the built pages no longer reference: the transcoded source
+# GIFs (~110MB), plus any gif-derived mp4/poster that ended up unused (e.g. GIFs that
+# were only a <video poster>, so their generated .mp4 is never linked). Only ever
+# touches gif-related artifacts — original Framer assets are left alone. Idempotent;
+# originals remain recoverable via git history / download.py for a re-encode.
 import glob
+referenced = set()
+for dst in PAGES.values():
+    h = open(os.path.join('site', dst), encoding='utf-8').read()
+    referenced.update(re.findall(r'assets/[\w./\-]+?\.(?:mp4|jpe?g|png|gif|webp|woff2?|css|js|json)', h))
+
+def _is_gif_artifact(path):
+    if path.endswith('.gif') or path.endswith('.poster.jpg'):
+        return True                                   # a source GIF or a generated poster
+    if path.endswith('.mp4'):                          # gif-derived mp4s have a poster sibling
+        return os.path.exists(path.replace('/videos/', '/images/')[:-4] + '.poster.jpg')
+    return False
+
 freed = removed = 0
-for base in _CONVERTED_GIFS:
-    for g in (glob.glob(f'site/assets/images/{base}.gif')
-              + glob.glob(f'site/assets/images/{base}.scale-down-to-*.gif')):
-        freed += os.path.getsize(g); os.remove(g); removed += 1
+for path in (glob.glob('site/assets/images/*.gif')
+             + glob.glob('site/assets/images/*.poster.jpg')
+             + glob.glob('site/assets/videos/*.mp4')):
+    if path[len('site/'):] in referenced or not _is_gif_artifact(path):
+        continue
+    freed += os.path.getsize(path); os.remove(path); removed += 1
 if removed:
-    print(f'\npruned {removed} converted-source GIFs ({freed//1024//1024}MB freed)')
+    print(f'\npruned {removed} unreferenced gif-derived files ({freed//1024//1024}MB freed)')
