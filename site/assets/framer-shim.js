@@ -212,7 +212,11 @@
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
         v.__hoverPlay = true; setupThumb(card, v);
       } else if (player) {
-        setupClickPlayer(player, v);                     // click-to-play, no autoplay
+        // click-to-play: the HTML now ships preload="none" (no eager buffering), but a
+        // showcase player should still show its first frame behind the Play button —
+        // metadata fetches just that, the rest streams in on click.
+        v.preload = 'metadata';
+        setupClickPlayer(player, v);
       } else {
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
         if (io) io.observe(v); else safePlay(v);         // background clips: in-view autoplay
@@ -260,7 +264,51 @@
   }
 
   /* ================================================================== *
-   * 5. SMOOTH ANCHOR SCROLL                                             *
+   * 5. PREFETCH  (warm the next page so cross-page nav feels instant)   *
+   *    Static MPA: each click is a full document load. Prefetch the      *
+   *    target HTML on hover/focus (high intent) and when a link idles    *
+   *    into view, so the browser serves it from cache on click. Paired   *
+   *    with immutable asset caching, the new page paints immediately.    *
+   * ================================================================== */
+  function initPrefetch() {
+    var seen = {};
+    function prefetch(url) {
+      if (!url || seen[url]) return;
+      seen[url] = 1;
+      var l = document.createElement('link');
+      l.rel = 'prefetch'; l.href = url;
+      document.head.appendChild(l);
+    }
+    function pageHref(a) {
+      var href = a.getAttribute('href') || '';
+      if (!href || href.charAt(0) === '#') return null;
+      if (/^[a-z]+:/i.test(href) || href.indexOf('//') === 0) return null;  // external / mailto / tel
+      var base = href.split('#')[0].split('?')[0];
+      return /\.html$/.test(base) ? base : null;                            // only our page docs
+    }
+    var links = filter(document.querySelectorAll('a[href]'), pageHref);
+    links.forEach(function (a) {
+      var u = pageHref(a);
+      a.addEventListener('pointerenter', function () { prefetch(u); });
+      a.addEventListener('focus', function () { prefetch(u); });
+    });
+    // warm links idling into view too (only a handful of distinct page docs, deduped)
+    var ric = window.requestIdleCallback || function (fn) { return setTimeout(fn, 1); };
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (es, obs) {
+        es.forEach(function (e) {
+          if (!e.isIntersecting) return;
+          obs.unobserve(e.target);
+          var u = pageHref(e.target);
+          ric(function () { prefetch(u); });
+        });
+      }, { rootMargin: '200px' });
+      links.forEach(function (a) { io.observe(a); });
+    }
+  }
+
+  /* ================================================================== *
+   * 6. SMOOTH ANCHOR SCROLL                                             *
    * ================================================================== */
   function initSmoothScroll() {
     document.addEventListener('click', function (e) {
@@ -296,6 +344,7 @@
     initReveal();       // …so their clones are picked up by the reveal sweep
     initVideos();
     initSmoothScroll();
+    initPrefetch();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);

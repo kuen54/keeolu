@@ -40,6 +40,57 @@ def rewrite_assets(html):
             html = html.replace(u, rel)
     return html
 
+# ids of GIFs that were transcoded to MP4 by convert_gifs.py. The signature of a
+# gif-derived video is a matching first-frame poster jpg (original Framer videos have
+# none), so this works even after the source GIFs are pruned from the deploy.
+_CONVERTED_GIFS = {
+    os.path.splitext(f)[0]
+    for f in os.listdir('site/assets/videos')
+    if f.endswith('.mp4') and os.path.exists(f'site/assets/images/{os.path.splitext(f)[0]}.poster.jpg')
+} if os.path.isdir('site/assets/videos') else set()
+
+def rewrite_gifs(html):
+    """Swap each standalone grid <img *.gif> for a muted autoplay-loop <video> of the
+    transcoded MP4 (same box: width/height attrs + object-fit style carried over, a
+    small first-frame poster shown until it plays). The shim treats these exactly like
+    Framer's background clips — in-view autoplay, paused off-screen."""
+    def repl(m):
+        tag = m.group(0)
+        sm = re.search(r'src="assets/images/([A-Za-z0-9]+)(?:\.scale-down-to-\d+)?\.gif"', tag)
+        if not sm:
+            return tag
+        base = sm.group(1)
+        if base not in _CONVERTED_GIFS:
+            return tag
+        wh = ''
+        for attr in ('width', 'height'):
+            a = re.search(r'\s%s="([^"]*)"' % attr, tag)
+            if a:
+                wh += ' %s="%s"' % (attr, a.group(1))
+        stm = re.search(r'\sstyle="([^"]*)"', tag)
+        style = (' style="%s"' % stm.group(1)) if stm else ''
+        return ('<video src="assets/videos/%s.mp4" poster="assets/images/%s.poster.jpg" '
+                'autoplay muted loop playsinline preload="none"%s%s></video>'
+                % (base, base, wh, style))
+    return re.sub(r'<img\b[^>]*?>', repl, html)
+
+def lazyload_images(html):
+    # defer every remaining <img> until it nears the viewport (all have explicit
+    # width/height, so no layout shift). Inactive-breakpoint copies live under
+    # display:none and thus never download at all.
+    def repl(m):
+        tag = m.group(0)
+        if 'loading=' in tag:
+            return tag
+        return tag[:4] + ' loading="lazy"' + tag[4:]
+    return re.sub(r'<img\b[^>]*?>', repl, html)
+
+def defer_videos(html):
+    # Framer SSRs every <video preload="auto"> — 142MB of eager buffering. The shim
+    # plays each clip only when it scrolls into view, so metadata-only is all we need
+    # (click-to-play players get their first frame back via preload="metadata" in JS).
+    return html.replace(' preload="auto"', ' preload="none"')
+
 SITE_URL = 'https://keeolu.pages.dev'
 
 def rewrite_head_urls(html):
@@ -107,6 +158,9 @@ report = {}
 for src, dst in PAGES.items():
     html = open(src, encoding='utf-8').read()
     html = rewrite_assets(html)
+    html = rewrite_gifs(html)      # standalone <img *.gif> -> muted autoplay <video>
+    html = lazyload_images(html)   # remaining <img> -> loading="lazy"
+    html = defer_videos(html)      # Framer <video preload="auto"> -> "none"
     html = rewrite_head_urls(html)
     html = rewrite_links(html)
     html = strip_framer_runtime(html)
@@ -124,3 +178,16 @@ for dst,(n,remain) in report.items():
         print(f'\n!! {dst} still references:')
         for r in remain[:30]:
             print('   ', r)
+
+# Prune the now-unreferenced source GIFs (converted to MP4 above) from the deploy —
+# no page loads them any more, they'd just be ~110MB of dead weight. Idempotent:
+# a rerun finds nothing left to remove. Originals remain recoverable via git history
+# / download.py if a re-encode is ever needed.
+import glob
+freed = removed = 0
+for base in _CONVERTED_GIFS:
+    for g in (glob.glob(f'site/assets/images/{base}.gif')
+              + glob.glob(f'site/assets/images/{base}.scale-down-to-*.gif')):
+        freed += os.path.getsize(g); os.remove(g); removed += 1
+if removed:
+    print(f'\npruned {removed} converted-source GIFs ({freed//1024//1024}MB freed)')

@@ -7,3 +7,8 @@ html { scroll-behavior: smooth; }
 
 /* marquee tracks never wrap while the shim clones/animates them */
 ul[style*="translateX"] { flex-wrap: nowrap !important; }
+
+/* Smooth cross-document fade between pages (Chrome/Edge 126+; every page opts in
+   because every page loads this stylesheet). Other browsers just do a normal nav.
+   Honours prefers-reduced-motion via the UA's default handling. */
+@view-transition { navigation: auto; }
