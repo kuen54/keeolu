@@ -40,6 +40,17 @@ def rewrite_assets(html):
             html = html.replace(u, rel)
     return html
 
+SITE_URL = 'https://keeolu.pages.dev'
+
+def rewrite_head_urls(html):
+    # point canonical / og:url / alternate at the deploy domain (was keeolu.com),
+    # and make the social-preview images absolute (crawlers can't resolve relative)
+    html = html.replace('https://keeolu.com', SITE_URL)
+    html = re.sub(
+        r'(<meta (?:property|name)="(?:og:image|twitter:image)" content=")assets/',
+        lambda m: m.group(1) + SITE_URL + '/assets/', html)
+    return html
+
 def rewrite_links(html):
     # ./route#hash or ./route  -> route.html(#hash)
     for r in ROUTES:
@@ -96,6 +107,7 @@ report = {}
 for src, dst in PAGES.items():
     html = open(src, encoding='utf-8').read()
     html = rewrite_assets(html)
+    html = rewrite_head_urls(html)
     html = rewrite_links(html)
     html = strip_framer_runtime(html)
     html = inject_noscript(html)
