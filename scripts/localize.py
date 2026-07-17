@@ -40,14 +40,15 @@ def rewrite_assets(html):
             html = html.replace(u, rel)
     return html
 
-# ids of GIFs that were transcoded to MP4 by convert_gifs.py. The signature of a
-# gif-derived video is a matching first-frame poster jpg (original Framer videos have
-# none), so this works even after the source GIFs are pruned from the deploy.
+# ids of GIFs that were transcoded by convert_gifs.py. The signature is a first-frame
+# poster jpg in images/ (grid GIFs get an mp4 too; poster-only GIFs — used just as a
+# <video poster> — get only the jpg once their unused mp4 is pruned). Keying on the
+# poster alone keeps the build idempotent across reruns.
 _CONVERTED_GIFS = {
-    os.path.splitext(f)[0]
-    for f in os.listdir('site/assets/videos')
-    if f.endswith('.mp4') and os.path.exists(f'site/assets/images/{os.path.splitext(f)[0]}.poster.jpg')
-} if os.path.isdir('site/assets/videos') else set()
+    f[:-len('.poster.jpg')]
+    for f in os.listdir('site/assets/images')
+    if f.endswith('.poster.jpg')
+} if os.path.isdir('site/assets/images') else set()
 
 def rewrite_gifs(html):
     """Swap each standalone grid <img *.gif> for a muted autoplay-loop <video> of the
@@ -60,7 +61,9 @@ def rewrite_gifs(html):
         if not sm:
             return tag
         base = sm.group(1)
-        if base not in _CONVERTED_GIFS:
+        # only swap to <video> when the transcoded mp4 actually exists (poster-only
+        # GIFs have a poster but no mp4 — they're never <img>, so this rarely triggers)
+        if base not in _CONVERTED_GIFS or not os.path.exists(f'site/assets/videos/{base}.mp4'):
             return tag
         wh = ''
         for attr in ('width', 'height'):
@@ -86,6 +89,20 @@ def rewrite_gif_posters(html):
             return 'poster="assets/images/%s.poster.jpg"' % base
         return m.group(0)
     return re.sub(r'poster="assets/images/([A-Za-z0-9]+)(?:\.scale-down-to-\d+)?\.gif"', repl, html)
+
+def add_video_posters(html):
+    """Give every posterless <video> a first-frame poster (from video_posters.py) so
+    its box shows the frame instantly instead of a blank rectangle while the lazy clip
+    buffers — this is the main fix for 'the page is blank at first'."""
+    def repl(m):
+        tag = m.group(0)
+        if 'poster=' in tag:
+            return tag
+        sm = re.search(r'src="assets/videos/([A-Za-z0-9]+)\.mp4"', tag)
+        if not sm or not os.path.exists(f'site/assets/videos/{sm.group(1)}.poster.jpg'):
+            return tag
+        return tag[:6] + ' poster="assets/videos/%s.poster.jpg"' % sm.group(1) + tag[6:]
+    return re.sub(r'<video\b[^>]*?>', repl, html)
 
 def lazyload_images(html):
     # defer every remaining <img> until it nears the viewport (all have explicit
@@ -149,19 +166,28 @@ def strip_framer_runtime(html):
     html = re.sub(r'<script>(.*?)</script>', _keep, html, flags=re.S)
     return html
 
-# Progressive-enhancement fallback: without JS, Framer's fade-up wrappers stay at
-# opacity:0 and the whole page is blank. This <noscript> rule reveals exactly what
-# framer-shim.js reveals — translate-based fade-ups and the <section> ticker
-# wrappers — while leaving blurred hover-caption overlays hidden.
-_NOSCRIPT = (
-    '<noscript><style>'
-    '[style*="opacity:0;"][style*="translate"]:not([style*="blur"]),'
-    '[style*="opacity:0.001"],'
-    'section[style*="opacity:0;"]{opacity:1!important;transform:none!important}'
-    '</style></noscript>'
+# Always-on "reveal by default". Framer ships the fade-up wrappers at opacity:0, so
+# the browser paints NOTHING until framer-shim.js runs — i.e. a blank page for the
+# whole time the (big) HTML streams over the network. Revealing them by default lets
+# the page paint progressively as it downloads; the shim then re-hides only the
+# BELOW-the-fold blocks (off-screen, so no visible flash) and fades them up on scroll,
+# preserving the entrance while making the first view instant. Doubles as the no-JS
+# fallback. `:not(ul)` leaves the marquee tracks (translate, no opacity:0) untouched;
+# blurred hover-caption overlays are excluded so they stay hidden.
+# NB: Framer emits both compact (`opacity:0;`) and spaced (`opacity: 0;`) inline
+# styles — cover both, or spaced wrappers (e.g. the click-to-play showcases) never
+# progressive-paint. The shim also JS-reveals above-fold as a robust backstop.
+_REVEAL_CSS = (
+    '<style>'
+    '[style*="opacity:0;"][style*="translate"]:not([style*="blur"]):not(ul),'
+    '[style*="opacity: 0;"][style*="translate"]:not([style*="blur"]):not(ul),'
+    '[style*="opacity:0.001"]:not(ul),'
+    'section[style*="opacity:0;"],section[style*="opacity: 0;"]'
+    '{opacity:1!important;transform:none!important}'
+    '</style>'
 )
-def inject_noscript(html):
-    return html.replace('</head>', _NOSCRIPT + '</head>', 1)
+def inject_reveal_css(html):
+    return html.replace('</head>', _REVEAL_CSS + '</head>', 1)
 
 def inject_shim(html):
     tag = '<link rel="stylesheet" href="assets/shim.css">\n<script src="assets/framer-shim.js" defer></script>\n</body>'
@@ -173,12 +199,13 @@ for src, dst in PAGES.items():
     html = rewrite_assets(html)
     html = rewrite_gifs(html)      # standalone <img *.gif> -> muted autoplay <video>
     html = rewrite_gif_posters(html)  # <video poster="*.gif"> -> transcoded first-frame jpg
+    html = add_video_posters(html)    # posterless <video> -> first-frame jpg (no blank box)
     html = lazyload_images(html)   # remaining <img> -> loading="lazy"
     html = defer_videos(html)      # Framer <video preload="auto"> -> "none"
     html = rewrite_head_urls(html)
     html = rewrite_links(html)
     html = strip_framer_runtime(html)
-    html = inject_noscript(html)
+    html = inject_reveal_css(html)  # reveal fade-ups by default (progressive paint)
     html = inject_shim(html)   # icons are injected at runtime by framer-shim.js
     open(os.path.join('site', dst), 'w', encoding='utf-8').write(html)
     # remaining remote refs?

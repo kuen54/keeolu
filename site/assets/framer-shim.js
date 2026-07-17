@@ -142,67 +142,78 @@
     return el.tagName === 'SECTION';
   }
 
+  // The page now ships "revealed by default" (an always-on <style> reveals the
+  // fade-up wrappers so the browser paints them as the HTML streams). This pass only
+  // RE-HIDES the below-the-fold blocks (off-screen, no visible flash) so they can
+  // fade up on scroll — the initial view stays instant. Inline `!important` beats the
+  // always-on stylesheet regardless of selector specificity.
   function initReveal() {
     var els = filter(document.querySelectorAll('[style*="opacity"]'), isFadeEl);
+    var vh = window.innerHeight;
+    var hidden = [];
+    els.forEach(function (el) {
+      if (el.getBoundingClientRect().top >= vh) {         // below the fold -> arm fade-up
+        el.style.setProperty('opacity', '0', 'important');
+        el.style.setProperty('transform', 'translateY(20px)', 'important');
+        el.__hidden = true; hidden.push(el);
+      } else {
+        // in/above view -> reveal via JS now (don't trust the CSS string-match to have
+        // caught every inline-style format, e.g. spaced `opacity: 0;` wrappers)
+        el.__shown = true;
+        el.style.setProperty('opacity', '1', 'important');
+        el.style.setProperty('transform', 'none', 'important');
+      }
+    });
 
-    // reveal(el, animate): animate=true fades up (real browsers); animate=false
-    // snaps to final with no transition (bulletproof — never depends on a
-    // transition completing, which some environments throttle).
-    function reveal(el, animate) {
+    function reveal(el) {
       if (el.__shown) return;
       el.__shown = true;
-      if (animate) {
-        el.style.transition = 'opacity 0.5s ' + EASE + ', transform 0.6s ' + EASE;
-        el.style.opacity = '1';
-        el.style.transform = 'none';
-        // lock the final state in case the transition is throttled/interrupted
-        setTimeout(function () { el.style.transition = 'none'; el.style.opacity = '1'; el.style.transform = 'none'; }, 620);
-      } else {
-        el.style.transition = 'none';
-        el.style.opacity = '1';
-        el.style.transform = 'none';
-      }
+      el.style.setProperty('transition', 'opacity 0.5s ' + EASE + ', transform 0.6s ' + EASE, 'important');
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('transform', 'none', 'important');
     }
 
-    // Primary: fade each block up as it scrolls into view (matches the original).
     if ('IntersectionObserver' in window) {
       var io = new IntersectionObserver(function (entries, obs) {
-        entries.forEach(function (e) { if (e.isIntersecting) { reveal(e.target, true); obs.unobserve(e.target); } });
+        entries.forEach(function (e) { if (e.isIntersecting) { reveal(e.target); obs.unobserve(e.target); } });
       }, { rootMargin: '0px 0px -8% 0px' });
-      els.forEach(function (el) { io.observe(el); });
-    }
+      hidden.forEach(function (el) { io.observe(el); });
+    } else { hidden.forEach(reveal); }
 
-    // Guarantee: snap-reveal anything already in or above the viewport. Runs on
-    // load, on scroll/resize, and on a short interval — so content is never left
-    // hidden even where IntersectionObserver/transitions are throttled. Below-
-    // the-fold blocks are left for the animated reveal above.
-    // reveal anything within ~1.35 viewports of the top edge (covers fast / jumpy
-    // scrolling and anything already scrolled past). `snap=true` forces the final
-    // state with no transition (used by the periodic backstop).
-    function guarantee(snap) {
-      var vh = window.innerHeight;
-      for (var i = 0; i < els.length; i++) {
-        var el = els[i];
-        if (!el.__shown && el.getBoundingClientRect().top < vh * 1.35) reveal(el, false);
+    // Backstop: never leave an armed block hidden once it's near/into view (covers
+    // fast scrolling and any environment that throttles IntersectionObserver).
+    function guarantee() {
+      var h = window.innerHeight * 1.35;
+      for (var i = 0; i < hidden.length; i++) {
+        if (!hidden[i].__shown && hidden[i].getBoundingClientRect().top < h) reveal(hidden[i]);
       }
     }
-    guarantee();
     window.addEventListener('scroll', guarantee, { passive: true });
     window.addEventListener('resize', guarantee);
-    window.addEventListener('load', function () { setTimeout(guarantee, 150); });
-    var ticks = 0, iv = setInterval(function () { guarantee(); if (++ticks >= 10) clearInterval(iv); }, 800);
+    var ticks = 0, iv = setInterval(function () { guarantee(); if (++ticks >= 8) clearInterval(iv); }, 700);
   }
 
   /* ================================================================== *
    * 4. VIDEOS                                                           *
    * ================================================================== */
   function initVideos() {
+    // background clips: play in view, pause off-screen
     var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es) {
       es.forEach(function (e) {
         if (e.target.__hoverPlay) return;
         if (e.isIntersecting) safePlay(e.target); else e.target.pause();
       });
     }, { threshold: 0.25 }) : null;
+    // warm interactive clips (click-players) BEFORE the user acts, once they're near
+    // the viewport — so a click plays instantly instead of buffering 3-4MB from cold.
+    // A first-frame poster is already shown, so this only affects click latency.
+    var warm = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es, obs) {
+      es.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        obs.unobserve(e.target);
+        try { e.target.preload = 'auto'; e.target.load(); } catch (x) {}
+      });
+    }, { rootMargin: '400px' }) : null;
 
     each(document.querySelectorAll('video'), function (v) {
       v.setAttribute('playsinline', ''); v.playsInline = true;
@@ -212,14 +223,17 @@
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
         v.__hoverPlay = true; setupThumb(card, v);
       } else if (player) {
-        // click-to-play: the HTML now ships preload="none" (no eager buffering), but a
-        // showcase player should still show its first frame behind the Play button —
-        // metadata fetches just that, the rest streams in on click.
-        v.preload = 'metadata';
         setupClickPlayer(player, v);
+        if (warm) warm.observe(v);                         // buffer ahead -> instant click
       } else {
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
-        if (io) io.observe(v); else safePlay(v);         // background clips: in-view autoplay
+        // hero / above-the-fold clips: buffer eagerly and play right now so the first
+        // screen isn't a blank video; the rest stay lazy and play as they scroll in.
+        if (v.getBoundingClientRect().top < window.innerHeight) {
+          try { v.preload = 'auto'; } catch (x) {}
+          safePlay(v);
+        }
+        if (io) io.observe(v); else safePlay(v);
       }
     });
   }
@@ -339,10 +353,10 @@
   function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^\w-]/g, '\\$&'); }
 
   function boot() {
+    initReveal();       // FIRST: keep the first screen visible, arm below-fold fade-ups
     initIcons();
-    initMarquees();     // clone ticker items first…
-    initReveal();       // …so their clones are picked up by the reveal sweep
     initVideos();
+    initMarquees();     // clones ticker items + reveals them itself
     initSmoothScroll();
     initPrefetch();
   }
