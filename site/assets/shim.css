@@ -12,3 +12,11 @@ ul[style*="translateX"] { flex-wrap: nowrap !important; }
    because every page loads this stylesheet). Other browsers just do a normal nav.
    Honours prefers-reduced-motion via the UA's default handling. */
 @view-transition { navigation: auto; }
+
+/* Framer marks hundreds of elements `will-change: transform`, and each one is
+   promoted to its own GPU compositor layer — permanently. That's a large idle memory
+   cost and makes every scroll frame composite hundreds of layers (the main cause of
+   the lingering jank). Drop the idle hint everywhere EXCEPT the marquee tracks, which
+   animate continuously and genuinely benefit; the browser still promotes a layer
+   on-demand for real hover/reveal transitions, so nothing loses its animation. */
+[style*="will-change"]:not(ul) { will-change: auto !important; }

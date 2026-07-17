@@ -181,29 +181,46 @@
     } else { hidden.forEach(reveal); }
 
     // Backstop: never leave an armed block hidden once it's near/into view (covers
-    // fast scrolling and any environment that throttles IntersectionObserver).
-    function guarantee() {
+    // fast scrolling and any environment that throttles IntersectionObserver). rAF-
+    // throttled so a burst of scroll events does at most one layout read per frame,
+    // and `hidden` shrinks as blocks reveal so the loop stays cheap.
+    var ticking = false;
+    function sweep() {
+      ticking = false;
       var h = window.innerHeight * 1.35;
-      for (var i = 0; i < hidden.length; i++) {
-        if (!hidden[i].__shown && hidden[i].getBoundingClientRect().top < h) reveal(hidden[i]);
+      for (var i = hidden.length - 1; i >= 0; i--) {
+        var el = hidden[i];
+        if (el.__shown) { hidden.splice(i, 1); continue; }
+        if (el.getBoundingClientRect().top < h) { reveal(el); hidden.splice(i, 1); }
       }
     }
+    function guarantee() { if (!ticking) { ticking = true; requestAnimationFrame(sweep); } }
     window.addEventListener('scroll', guarantee, { passive: true });
     window.addEventListener('resize', guarantee);
-    var ticks = 0, iv = setInterval(function () { guarantee(); if (++ticks >= 8) clearInterval(iv); }, 700);
+    var ticks = 0, iv = setInterval(function () { sweep(); if (++ticks >= 8 || !hidden.length) clearInterval(iv); }, 700);
   }
 
   /* ================================================================== *
    * 4. VIDEOS                                                           *
    * ================================================================== */
   function initVideos() {
-    // background clips: play in view, pause off-screen
-    var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es) {
-      es.forEach(function (e) {
-        if (e.target.__hoverPlay) return;
-        if (e.isIntersecting) safePlay(e.target); else e.target.pause();
+    // Background clips: decoding many autoplay videos at once is the real scroll-jank
+    // killer. Play only the most-visible few (>=35% in view, capped) and pause the
+    // rest — clips scrolling past (or barely peeking in) don't decode. Each shows its
+    // poster while paused, so a paused-but-visible tile still looks intentional.
+    var bg = [], CAP = 6;
+    function reconcile() {
+      var vis = bg.filter(function (v) { return v.__ratio >= 0.35; })
+                  .sort(function (a, b) { return b.__ratio - a.__ratio; });
+      bg.forEach(function (v) {
+        var i = vis.indexOf(v);
+        if (i > -1 && i < CAP) safePlay(v); else v.pause();
       });
-    }, { threshold: 0.25 }) : null;
+    }
+    var io = ('IntersectionObserver' in window) ? new IntersectionObserver(function (es) {
+      es.forEach(function (e) { e.target.__ratio = e.isIntersecting ? e.intersectionRatio : 0; });
+      reconcile();
+    }, { threshold: [0, 0.35, 0.6, 1] }) : null;
     // warm interactive clips (click-players) BEFORE the user acts, once they're near
     // the viewport — so a click plays instantly instead of buffering 3-4MB from cold.
     // A first-frame poster is already shown, so this only affects click latency.
@@ -227,11 +244,12 @@
         if (warm) warm.observe(v);                         // buffer ahead -> instant click
       } else {
         v.muted = true; v.loop = true; v.setAttribute('muted', '');
-        // hero / above-the-fold clips: buffer eagerly and play right now so the first
-        // screen isn't a blank video; the rest stay lazy and play as they scroll in.
+        bg.push(v);
+        // hero / above-the-fold clips: buffer eagerly and play now so the first screen
+        // isn't a blank video (reconcile keeps it playing since it's fully visible).
         if (v.getBoundingClientRect().top < window.innerHeight) {
           try { v.preload = 'auto'; } catch (x) {}
-          safePlay(v);
+          v.__ratio = 1; safePlay(v);
         }
         if (io) io.observe(v); else safePlay(v);
       }
